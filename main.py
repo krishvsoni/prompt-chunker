@@ -164,11 +164,10 @@ async def main():
         "results": results
     }
 
-    with open("results.json", "w", encoding="utf-8") as f:
+    with open("output.json", "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, default=str)
 
-    print(f"\nResults saved to results.json")
-
+    print(f"\nResults saved to output.json")
 
 if __name__ == "__main__":
     asyncio.run(main())
