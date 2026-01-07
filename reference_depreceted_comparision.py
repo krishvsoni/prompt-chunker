@@ -1,3 +1,9 @@
+"""
+This is old code which I wrote in intial level to compare different PDF extraction methods.
+It contains functions to extract text from PDFs using PyPDF, LLM Sherpa, and a prompt-based chunking approach.
+"""
+
+
 import os
 import time
 import json

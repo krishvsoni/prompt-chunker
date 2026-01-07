@@ -1,56 +1,174 @@
+"""
+Main entry point for document processing pipeline.
+
+Processes PDF documents using three methods and compares results:
+1. PyPDF - Baseline text extraction
+2. LLM Sherpa - Layout-based parsing
+3. Prompt-Based - Semantic chunking with metadata enrichment
+"""
+
+import os
 import asyncio
-from compare_pipeline import run
+import json
+from typing import List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
 
-async def main():
-    results = await asyncio.gather(
-        asyncio.to_thread(run, "data/doc001.pdf"),
-        asyncio.to_thread(run, "data/doc002.pdf"),
-        asyncio.to_thread(run, "data/doc003.pdf"),
-        asyncio.to_thread(run, "data/ai_queue_design.pdf")
-    )
+from pipeline import run as process_document
+from comparison_analysis import generate_comparison_report, get_flaw_analysis
 
-    # Aggregate final metrics across all documents and methods
+
+async def process_documents(pdf_paths: List[str]) -> List[Dict[str, Any]]:
+    """Process multiple documents in parallel."""
+    loop = asyncio.get_event_loop()
+    results = []
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        tasks = [
+            loop.run_in_executor(executor, process_document, path)
+            for path in pdf_paths
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    valid_results = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"Error processing {pdf_paths[i]}: {result}")
+        else:
+            valid_results.append(result)
+
+    return valid_results
+
+
+def aggregate_metrics(results: List[Dict[str, Any]]) -> Dict[str, Dict]:
+    """Calculate aggregate metrics across all documents."""
     methods = ["pypdf", "sherpa", "prompt"]
     summary = {}
+
     for m in methods:
-        docs_with = sum(1 for r in results if r.get(m) and len(r.get(m)) > 0)
-        total_chunks = sum(len(r.get(m) or []) for r in results)
-        total_chars = sum(len(c.get("text", "")) for r in results for c in (r.get(m) or []))
-        avg_chunks_per_doc = total_chunks / len(results) if results else 0
-        avg_chunk_length = (total_chars / total_chunks) if total_chunks else 0
-        relevant_chunks = sum(1 for r in results for c in (r.get(m) or []) if len(c.get("text", "")) > 200)
-        relevance_pct = (relevant_chunks / total_chunks * 100) if total_chunks else 0
+        chunks_data = [r.get(m, {}).get("chunks", []) for r in results]
+        metrics_data = [r.get(m, {}).get("metrics", {}) for r in results]
+
+        total_chunks = sum(len(c) for c in chunks_data)
+        total_chars = sum(len(chunk.get("text", "")) for c in chunks_data for chunk in c)
+        docs_with = sum(1 for c in chunks_data if c)
+
+        avg_quality = 0
+        quality_values = [chunk.get("quality_score", 0) for c in chunks_data for chunk in c]
+        if quality_values:
+            avg_quality = sum(quality_values) / len(quality_values)
+
+        relevant = sum(1 for c in chunks_data for chunk in c if len(chunk.get("text", "")) > 200)
+        optimal = sum(1 for c in chunks_data for chunk in c if 300 <= len(chunk.get("text", "")) <= 800)
 
         summary[m] = {
-            "docs_with_chunks": docs_with,
+            "docs_processed": docs_with,
+            "total_docs": len(results),
             "total_chunks": total_chunks,
-            "avg_chunks_per_doc": round(avg_chunks_per_doc, 2),
-            "avg_chunk_length": round(avg_chunk_length, 1),
-            "relevant_chunks": relevant_chunks,
-            "relevance_pct": round(relevance_pct, 1)
+            "avg_chunks_per_doc": round(total_chunks / len(results), 2) if results else 0,
+            "avg_chunk_length": round(total_chars / total_chunks, 1) if total_chunks else 0,
+            "avg_quality_score": round(avg_quality, 2),
+            "relevant_chunks": relevant,
+            "relevance_pct": round(relevant / total_chunks * 100, 1) if total_chunks else 0,
+            "optimal_size_chunks": optimal,
+            "optimal_pct": round(optimal / total_chunks * 100, 1) if total_chunks else 0,
+            "total_time": round(sum(m.get("processing_time", 0) for m in metrics_data), 2)
         }
 
-    print("\nFinal Summary Across Documents:")
-    for m, stats in summary.items():
-        print(f"\nMethod: {m}")
-        print(f" - Docs w/ chunks: {stats['docs_with_chunks']}/{len(results)}")
-        print(f" - Total chunks: {stats['total_chunks']}")
-        print(f" - Avg chunks/doc: {stats['avg_chunks_per_doc']}")
-        print(f" - Avg chunk length (chars): {stats['avg_chunk_length']}")
-        print(f" - Relevant chunks (>200 chars): {stats['relevant_chunks']} ({stats['relevance_pct']}%)")
+    return summary
 
-    # Best per metric
-    def _best(metric):
-        best_m = max(summary.keys(), key=lambda k: summary[k][metric])
-        return best_m, summary[best_m][metric]
 
-    best_docs_method, best_docs_val = _best("docs_with_chunks")
-    best_chunks_method, best_chunks_val = _best("total_chunks")
-    best_relevance_method, best_relevance_val = _best("relevance_pct")
+def print_results(summary: Dict[str, Dict], results: List[Dict[str, Any]]):
+    """Print formatted results summary."""
+    print("\n" + "=" * 70)
+    print("AGGREGATE METRICS")
+    print("=" * 70)
 
-    print("\nBest Methods by Metric:")
-    print(f" - Most documents covered: {best_docs_method} ({best_docs_val}/{len(results)})")
-    print(f" - Most chunks produced: {best_chunks_method} ({best_chunks_val})")
-    print(f" - Highest relevance %: {best_relevance_method} ({best_relevance_val}%)")
+    for method, stats in summary.items():
+        print(f"\n{method.upper()}")
+        print("-" * 40)
+        print(f"  Docs processed: {stats['docs_processed']}/{stats['total_docs']}")
+        print(f"  Total chunks: {stats['total_chunks']}")
+        print(f"  Avg chunks/doc: {stats['avg_chunks_per_doc']}")
+        print(f"  Avg chunk length: {stats['avg_chunk_length']} chars")
+        print(f"  Avg quality score: {stats['avg_quality_score']}/10")
+        print(f"  Relevant (>200 chars): {stats['relevant_chunks']} ({stats['relevance_pct']}%)")
+        print(f"  Optimal size (300-800): {stats['optimal_size_chunks']} ({stats['optimal_pct']}%)")
+        print(f"  Processing time: {stats['total_time']}s")
 
-asyncio.run(main())
+    print("\n" + "=" * 70)
+    print("BEST METHOD BY METRIC")
+    print("=" * 70)
+
+    metrics_to_compare = [
+        ("total_chunks", "Most granular", True),
+        ("relevance_pct", "Highest relevance", True),
+        ("optimal_pct", "Optimal sizing", True),
+        ("avg_quality_score", "Best quality", True),
+        ("total_time", "Fastest", False)
+    ]
+
+    for metric, label, higher_better in metrics_to_compare:
+        if higher_better:
+            best = max(summary.keys(), key=lambda k: summary[k][metric])
+        else:
+            best = min(summary.keys(), key=lambda k: summary[k][metric])
+        print(f"  {label}: {best} ({summary[best][metric]})")
+
+    flaws = get_flaw_analysis()
+    print("\n" + "=" * 70)
+    print("METHOD FLAWS ANALYSIS")
+    print("=" * 70)
+
+    print("\nPyPDF Flaws:")
+    for flaw in flaws["pypdf_flaws"][:3]:
+        print(f"  - {flaw}")
+
+    print("\nSherpa Flaws:")
+    for flaw in flaws["sherpa_flaws"][:3]:
+        print(f"  - {flaw}")
+
+    print("\nPrompt Advantages:")
+    for adv in flaws["prompt_solutions"][:3]:
+        print(f"  + {adv}")
+
+
+async def main():
+    """Main execution function."""
+    data_dir = "data"
+    pdf_files = []
+
+    if os.path.exists(data_dir):
+        pdf_files = [
+            os.path.join(data_dir, f)
+            for f in os.listdir(data_dir)
+            if f.endswith(".pdf")
+        ]
+
+    if not pdf_files:
+        print("No PDF files found in data directory.")
+        return
+
+    print(f"Processing {len(pdf_files)} documents...")
+
+    results = await process_documents(pdf_files)
+
+    if not results:
+        print("No documents processed successfully.")
+        return
+
+    summary = aggregate_metrics(results)
+    print_results(summary, results)
+
+    output = {
+        "summary": summary,
+        "results": results
+    }
+
+    with open("results.json", "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    print(f"\nResults saved to results.json")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
