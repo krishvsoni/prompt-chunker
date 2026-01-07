@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pipeline Results Viewer</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; margin: 18px; color:#111 }
+    h1,h2,h3 { margin: 6px 0 }
+    .grid { display:flex; gap:12px; flex-wrap:wrap }
+    .card { border:1px solid #ddd; padding:12px; border-radius:6px; background:#fff; min-width:260px }
+    pre { white-space:pre-wrap; max-height:240px; overflow:auto; background:#f7f7f7; padding:10px }
+    table { border-collapse:collapse; width:100% }
+    th,td{border:1px solid #eee;padding:6px;text-align:left}
+    .small { font-size:0.9em; color:#666 }
+    .chunk { margin-bottom:8px; border-bottom:1px dashed #eee; padding-bottom:6px }
+    button { padding:6px 8px; margin:4px 0 }
+    .meta { font-size:0.85em; color:#333 }
+  </style>
+</head>
+<body>
+  <h1>Pipeline Results Viewer</h1>
+  <p class="small">This page displays aggregated summary, per-document comparisons, recommendations and chunk previews.</p>
+
+  <h2>Aggregate Summary</h2>
+  <div id="aggregate"></div>
+
+  <h2>Per-Document Results</h2>
+  <div id="documents"></div>
+
+  <h2>Raw JSON</h2>
+  <details><summary>Show raw JSON</summary><pre id="raw"></pre></details>
+
+  <script>
+    async function loadAndRender(){
+      let data;
+      try{
+        const resp = await fetch('output.json');
+        if(!resp.ok) throw new Error('Failed to fetch output.json: '+resp.status+' '+resp.statusText);
+        data = await resp.json();
+      }catch(e){
+        document.body.innerHTML = '<h2>Error loading output.json</h2><pre>'+String(e)+'</pre>';
+        return;
+      }
+
+      function mkTable(obj){
+        const tbl = document.createElement('table');
+        const thead = document.createElement('thead');
+        const trh = document.createElement('tr');
+        trh.innerHTML = '<th>Metric</th><th>PyPDF</th><th>Sherpa</th><th>Prompt</th>';
+        thead.appendChild(trh);
+        tbl.appendChild(thead);
+        const tbody = document.createElement('tbody');
+        const metrics = ['total_chunks','avg_chunk_length','avg_quality_score','relevance_pct','optimal_pct','total_time'];
+        const labels = { total_chunks:'Total chunks', avg_chunk_length:'Avg chunk length', avg_quality_score:'Avg quality', relevance_pct:'Relevance %', optimal_pct:'Optimal %', total_time:'Total time (s)'};
+        for(const m of metrics){
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${labels[m]||m}</td>` +
+            `<td>${(obj.pypdf && obj.pypdf[m]) ?? 'N/A'}</td>`+
+            `<td>${(obj.sherpa && obj.sherpa[m]) ?? 'N/A'}</td>`+
+            `<td>${(obj.prompt && obj.prompt[m]) ?? 'N/A'}</td>`;
+          tbody.appendChild(tr);
+        }
+        tbl.appendChild(tbody);
+        return tbl;
+      }
+
+      // Aggregate
+      const aggDiv = document.getElementById('aggregate');
+      aggDiv.appendChild(mkTable(data.summary));
+
+      // Documents
+      const docsDiv = document.getElementById('documents');
+      data.results.forEach((doc, idx)=>{
+        const card = document.createElement('div'); card.className='card';
+        const title = document.createElement('h3'); title.textContent = `Document ${idx+1}`;
+        card.appendChild(title);
+
+        // Recommendation
+        const comp = doc.comparison || {};
+        if(comp.recommendation){
+          const rec = document.createElement('p'); rec.innerHTML = '<strong>Recommendation:</strong> '+comp.recommendation;
+          card.appendChild(rec);
+        }
+
+        // Metrics per method
+        const flex = document.createElement('div'); flex.className='grid';
+        ['pypdf','sherpa','prompt'].forEach(m=>{
+          const mcard = document.createElement('div'); mcard.className='card';
+          const mh = document.createElement('h4'); mh.textContent = m.toUpperCase(); mcard.appendChild(mh);
+          const metrics = (doc[m] && doc[m].metrics) || {};
+          const ul = document.createElement('div'); ul.className='meta';
+          ul.innerHTML = `Chunks: ${metrics.chunk_count|| ((doc[m]&&doc[m].chunks)?doc[m].chunks.length:0)}<br/>Time: ${metrics.processing_time||metrics.total_processing_time||0}s`;
+          mcard.appendChild(ul);
+
+          // chunk list preview
+          const chunks = (doc[m] && doc[m].chunks) || [];
+          const list = document.createElement('div');
+          list.style.maxHeight='220px'; list.style.overflow='auto';
+          chunks.slice(0,10).forEach(c=>{
+            const div = document.createElement('div'); div.className='chunk';
+            const h = document.createElement('div'); h.innerHTML = `<strong>${c.chunk_id}</strong> <span class="small">(${c.source})</span>`;
+            div.appendChild(h);
+            const p = document.createElement('div'); p.innerHTML = `<em>${(c.metadata && c.metadata.summary) ? c.metadata.summary : (c.text||'').slice(0,200)+'...'}</em>`;
+            div.appendChild(p);
+            const btn = document.createElement('button'); btn.textContent='Show full';
+            const pre = document.createElement('pre'); pre.style.display='none'; pre.textContent = c.text||'';
+            btn.onclick = ()=>{ pre.style.display = pre.style.display==='none' ? 'block' : 'none'; btn.textContent = pre.style.display==='none' ? 'Show full' : 'Hide'; };
+            div.appendChild(btn); div.appendChild(pre);
+            list.appendChild(div);
+          });
+          if(chunks.length>10){ const more = document.createElement('div'); more.className='small'; more.textContent = `Showing 10 of ${chunks.length} chunks`; list.appendChild(more); }
+          mcard.appendChild(list);
+          flex.appendChild(mcard);
+        });
+
+        card.appendChild(flex);
+        docsDiv.appendChild(card);
+      });
+
+      document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
+    }
+    loadAndRender();
+  </script>
+</body>
+</html>
