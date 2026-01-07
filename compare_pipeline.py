@@ -22,7 +22,8 @@ def extract_with_pypdf(pdf_path: str) -> List[Dict]:
     return [{
         "chunk_id": "pypdf_0",
         "title": "__entire_document__",
-        "text": text
+        "text": text,
+        "source": "pypdf"
     }]
 
 
@@ -61,7 +62,8 @@ def extract_with_sherpa(pdf_path: str) -> List[Dict]:
         chunks.append({
             "chunk_id": f"sherpa_{i}",
             "title": title,
-            "text": text
+            "text": text,
+            "source": "sherpa"
         })
 
     if len(chunks) <= 1:
@@ -201,7 +203,8 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
             chunks.append({
                 "chunk_id": f"prompt_{len(chunks)}",
                 "title": title,
-                "text": "\n\n".join(current)
+                "text": "\n\n".join(current),
+                "source": "prompt"
             })
             current = []
 
@@ -214,7 +217,8 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
         chunks.append({
             "chunk_id": f"prompt_{len(chunks)}",
             "title": title,
-            "text": "\n\n".join(current)
+            "text": "\n\n".join(current),
+            "source": "prompt"
         })
 
     if len(chunks) <= 1:
@@ -263,7 +267,8 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
             chunks.append({
                 "chunk_id": f"prompt_{len(chunks)}",
                 "title": title,
-                "text": "\n\n".join(current)
+                "text": "\n\n".join(current),
+                "source": "prompt"
             })
             current = []
 
@@ -276,7 +281,8 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
         chunks.append({
             "chunk_id": f"prompt_{len(chunks)}",
             "title": title,
-            "text": "\n\n".join(current)
+            "text": "\n\n".join(current),
+            "source": "prompt"
         })
 
     if len(chunks) <= 1:
@@ -288,8 +294,7 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
 
 
 def run(pdf_path: str):
-    print("\n--- Running Comparison ---\n")
-
+    print(f"Processing: {pdf_path}")
     t0 = time.time()
     pypdf_chunks = extract_with_pypdf(pdf_path)
     print(f"PyPDF    -> {len(pypdf_chunks)} chunks | {time.time()-t0:.2f}s")
@@ -300,12 +305,22 @@ def run(pdf_path: str):
 
     # Route to prompt chunker if Sherpa is weak
     t0 = time.time()
-    if len(sherpa_chunks) <= 1:
-        print("Routing to semantic prompt chunker")
+    prompt_chunks = []
+    try:
+        if len(sherpa_chunks) <= 1:
+            print("Routing to semantic prompt chunker")
         prompt_chunks = extract_with_prompt(pdf_path)
-    else:
-        prompt_chunks = extract_with_prompt(pdf_path)
+    except RuntimeError as e:
+        # Non-fatal: proceed if prompt chunking isn't possible
+        print("Prompt chunking skipped:", e)
+        prompt_chunks = []
+
     print(f"Prompt   -> {len(prompt_chunks)} chunks | {time.time()-t0:.2f}s")
+    # Summary logs: counts only
+    print("\nSummary:")
+    print(f"- PyPDF: {len(pypdf_chunks)} chunks")
+    print(f"- Sherpa: {len(sherpa_chunks)} chunks")
+    print(f"- Prompt: {len(prompt_chunks)} chunks")
 
     return {
         "pypdf": pypdf_chunks,
