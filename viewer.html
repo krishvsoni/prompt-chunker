@@ -51,8 +51,8 @@
         thead.appendChild(trh);
         tbl.appendChild(thead);
         const tbody = document.createElement('tbody');
-        const metrics = ['total_chunks','avg_chunk_length','avg_quality_score','relevance_pct','optimal_pct','total_time'];
-        const labels = { total_chunks:'Total chunks', avg_chunk_length:'Avg chunk length', avg_quality_score:'Avg quality', relevance_pct:'Relevance %', optimal_pct:'Optimal %', total_time:'Total time (s)'};
+        const metrics = ['total_chunks','avg_chunk_length','avg_quality_score','relevance_pct','semantic_accept_rate','topk_sufficiency_rate','boundary_confidence','total_time'];
+        const labels = { total_chunks:'Total chunks', avg_chunk_length:'Avg chunk length', avg_quality_score:'Avg quality', relevance_pct:'Relevance %', semantic_accept_rate:'Semantic Accept %', topk_sufficiency_rate:'Top-K Sufficiency %', boundary_confidence:'Boundary Confidence %', total_time:'Total time (s)'};
         for(const m of metrics){
           const tr = document.createElement('tr');
           tr.innerHTML = `<td>${labels[m]||m}</td>` +
@@ -68,6 +68,52 @@
       // Aggregate
       const aggDiv = document.getElementById('aggregate');
       aggDiv.appendChild(mkTable(data.summary));
+
+    //   // Method Analysis: Flaws & Advantages
+    //   if(data.analysis){
+    //     const analysisDiv = document.createElement('div');
+    //     analysisDiv.innerHTML = '<h2>Method Flaws & Advantages</h2>';
+    //     const analysisGrid = document.createElement('div'); analysisGrid.className='grid';
+
+    //     const mkListCard = (title, items, style='flaw')=>{
+    //       const card = document.createElement('div'); card.className='card';
+    //       card.innerHTML = `<h4>${title}</h4>`;
+    //       const ul = document.createElement('div'); ul.className='meta';
+    //       if(!items||!items.length){ ul.innerHTML='<em>No data</em>'; }
+    //       else { ul.innerHTML = items.slice(0,8).map(i=>`<div style="margin:3px 0;color:${style==='adv'?'#080':'#800'}">${style==='adv'?'✅':'❌'} ${i}</div>`).join(''); }
+    //       card.appendChild(ul);
+    //       return card;
+    //     };
+
+    //     const flaws = data.analysis.flaws || {};
+    //     analysisGrid.appendChild(mkListCard('PyPDF Flaws', flaws.pypdf_flaws, 'flaw'));
+    //     analysisGrid.appendChild(mkListCard('Sherpa Flaws', flaws.sherpa_flaws, 'flaw'));
+    //     analysisGrid.appendChild(mkListCard('Prompt Advantages', flaws.prompt_solutions, 'adv'));
+    //     if(data.analysis.prompt_disadvantages){
+    //       analysisGrid.appendChild(mkListCard('Prompt Disadvantages', data.analysis.prompt_disadvantages, 'flaw'));
+    //     }
+    //     analysisDiv.appendChild(analysisGrid);
+
+    //     // Metric explanation
+    //     if(data.analysis.metric_explanation){
+    //       const exp = document.createElement('p');
+    //       exp.className='small';
+    //       exp.style.marginTop='12px';
+    //       exp.innerHTML = '<strong>Metric Change:</strong> '+data.analysis.metric_explanation;
+    //       analysisDiv.appendChild(exp);
+    //     }
+
+    //     // Comparison report (collapsible)
+    //     if(data.analysis.comparison_report){
+    //       const det = document.createElement('details');
+    //       det.innerHTML = '<summary>Full Comparison Report</summary>';
+    //       const pre = document.createElement('pre'); pre.textContent = data.analysis.comparison_report;
+    //       det.appendChild(pre);
+    //       analysisDiv.appendChild(det);
+    //     }
+
+    //     aggDiv.parentNode.insertBefore(analysisDiv, aggDiv.nextSibling);
+    //   }
 
       // Documents
       const docsDiv = document.getElementById('documents');

@@ -58,7 +58,21 @@ def aggregate_metrics(results: List[Dict[str, Any]]) -> Dict[str, Dict]:
             avg_quality = sum(quality_values) / len(quality_values)
 
         relevant = sum(1 for c in chunks_data for chunk in c if len(chunk.get("text", "")) > 200)
-        optimal = sum(1 for c in chunks_data for chunk in c if 300 <= len(chunk.get("text", "")) <= 800)
+
+
+        accepted_chunks = sum(1 for c in chunks_data for chunk in c if chunk.get("quality_score", 0) >= 7)
+        semantic_accept_rate = round(accepted_chunks / total_chunks * 100, 1) if total_chunks else 0
+
+    
+        sufficient_chunks = sum(1 for c in chunks_data for chunk in c 
+                                if chunk.get("quality_score", 0) >= 6 and len(chunk.get("text", "")) > 300)
+        topk_sufficiency_rate = round(sufficient_chunks / total_chunks * 100, 1) if total_chunks else 0
+
+        boundary_scores = []
+        for md in metrics_data:
+            bc = md.get("boundary_confidence", 0)
+            if bc: boundary_scores.append(bc)
+        boundary_confidence = round(sum(boundary_scores) / len(boundary_scores), 1) if boundary_scores else 0
 
         summary[m] = {
             "docs_processed": docs_with,
@@ -69,8 +83,9 @@ def aggregate_metrics(results: List[Dict[str, Any]]) -> Dict[str, Dict]:
             "avg_quality_score": round(avg_quality, 2),
             "relevant_chunks": relevant,
             "relevance_pct": round(relevant / total_chunks * 100, 1) if total_chunks else 0,
-            "optimal_size_chunks": optimal,
-            "optimal_pct": round(optimal / total_chunks * 100, 1) if total_chunks else 0,
+            "semantic_accept_rate": semantic_accept_rate,
+            "topk_sufficiency_rate": topk_sufficiency_rate,
+            "boundary_confidence": boundary_confidence,
             "total_time": round(sum(m.get("processing_time", 0) for m in metrics_data), 2)
         }
 
@@ -92,7 +107,9 @@ def print_results(summary: Dict[str, Dict], results: List[Dict[str, Any]]):
         print(f"  Avg chunk length: {stats['avg_chunk_length']} chars")
         print(f"  Avg quality score: {stats['avg_quality_score']}/10")
         print(f"  Relevant (>200 chars): {stats['relevant_chunks']} ({stats['relevance_pct']}%)")
-        print(f"  Optimal size (300-800): {stats['optimal_size_chunks']} ({stats['optimal_pct']}%)")
+        print(f"  Semantic Accept Rate: {stats['semantic_accept_rate']}%")
+        print(f"  Top-K Sufficiency Rate: {stats['topk_sufficiency_rate']}%")
+        print(f"  Boundary Confidence: {stats['boundary_confidence']}%")
         print(f"  Processing time: {stats['total_time']}s")
 
     print("\n" + "=" * 70)
@@ -102,7 +119,9 @@ def print_results(summary: Dict[str, Dict], results: List[Dict[str, Any]]):
     metrics_to_compare = [
         ("total_chunks", "Most granular", True),
         ("relevance_pct", "Highest relevance", True),
-        ("optimal_pct", "Optimal sizing", True),
+        ("semantic_accept_rate", "Best semantic accept", True),
+        ("topk_sufficiency_rate", "Best top-K sufficiency", True),
+        ("boundary_confidence", "Best boundary confidence", True),
         ("avg_quality_score", "Best quality", True),
         ("total_time", "Fastest", False)
     ]
@@ -159,9 +178,30 @@ async def main():
     summary = aggregate_metrics(results)
     print_results(summary, results)
 
+    # Get analysis data
+    flaws = get_flaw_analysis()
+    report = generate_comparison_report()
+
     output = {
         "summary": summary,
-        "results": results
+        "results": results,
+        "analysis": {
+            "flaws": flaws,
+            "comparison_report": report,
+            "prompt_disadvantages": [
+                "Higher processing time due to multiple LLM calls",
+                "API costs can be significant for large document sets",
+                "Non-determinism: outputs may vary across runs",
+                "Potential hallucinations in boundary/metadata detection",
+                "Token/context limits require document pre-chunking",
+                "Performance sensitive to prompt quality/phrasing",
+                "Scalability challenges for large-scale ingestion",
+                "Privacy risk when using external LLM APIs",
+                "Harder to debug why specific decisions were made",
+                "Dependence on LLM provider availability"
+            ],
+            "metric_explanation": "We removed 'Optimal %' because it measured heuristic size constraints. We replaced it with semantic_accept_rate, topk_sufficiency_rate, and boundary_confidence which directly reflect retrieval correctness."
+        }
     }
 
     with open("output.json", "w", encoding="utf-8") as f:
