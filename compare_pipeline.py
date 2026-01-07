@@ -156,6 +156,85 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
     if len(blocks) <= 1:
         raise RuntimeError("Not enough content for semantic chunking")
 
+    all_decisions = []
+    BATCH_SIZE = 25
+
+    for i in range(0, len(blocks), BATCH_SIZE):
+        batch = blocks[i:i + BATCH_SIZE]
+
+        messages = [
+            {"role": "system", "content": "You are a JSON generator. Output JSON array only."},
+            {
+                "role": "user",
+                "content": STRUCTURE_ANALYST_PROMPT
+                + "\n\nBlocks:\n"
+                + json.dumps(batch)
+            }
+        ]
+
+        resp = call_llm(messages)
+
+        content = resp.choices[0].message.content.strip()
+
+        try:
+            decisions = json.loads(content)
+        except json.JSONDecodeError:
+            # HARD FAIL with context
+            raise RuntimeError(
+                "LLM returned invalid JSON. "
+                "Reduce batch size or inspect prompt.\n"
+                f"Raw output:\n{content[:500]}"
+            )
+
+        all_decisions.extend(decisions)
+
+    # Build chunks
+    chunks = []
+    current = []
+    title = "__auto__"
+
+    for dec, block in zip(all_decisions, blocks):
+        if dec.get("role") == "noise":
+            continue
+
+        if dec.get("new_chunk") and current:
+            chunks.append({
+                "chunk_id": f"prompt_{len(chunks)}",
+                "title": title,
+                "text": "\n\n".join(current)
+            })
+            current = []
+
+        if dec.get("role") in ("section_header", "subsection_header"):
+            title = block["text"][:80]
+
+        current.append(block["text"])
+
+    if current:
+        chunks.append({
+            "chunk_id": f"prompt_{len(chunks)}",
+            "title": title,
+            "text": "\n\n".join(current)
+        })
+
+    if len(chunks) <= 1:
+        raise RuntimeError("Prompt chunking failed — semantic boundaries not detected")
+
+    return chunks
+    from pypdf import PdfReader
+
+    reader = PdfReader(pdf_path)
+    raw_text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
+
+    blocks = [
+        {"id": f"b{i}", "text": p.strip()}
+        for i, p in enumerate(raw_text.split("\n\n"))
+        if len(p.strip()) > 40
+    ]
+
+    if len(blocks) <= 1:
+        raise RuntimeError("Not enough content for semantic chunking")
+
     messages = [
         {"role": "system", "content": "Output strict JSON only."},
         {"role": "user", "content": STRUCTURE_ANALYST_PROMPT + "\n\nBlocks:\n" + json.dumps(blocks)}
@@ -169,7 +248,7 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
         if not resp or not hasattr(resp, "choices") or not resp.choices:
             raise ValueError("Invalid response from LLM: Missing 'choices'")
         decisions = json.loads(resp.choices[0].message.content)
-    except (AttributeError, JSONDecodeError, ValueError) as e:
+    except (AttributeError, json.JSONDecodeError, ValueError) as e:
         raise RuntimeError(f"Failed to parse LLM response: {e}")
 
     chunks = []
