@@ -5,95 +5,119 @@ import difflib
 from typing import List, Dict
 
 
+
 def normalize(s: str) -> str:
     return " ".join(s.lower().strip().split())
 
 def fuzzy_match(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, normalize(a), normalize(b)).ratio()
 
-def assert_chunks(chunks, name):
-    assert len(chunks) > 1, f"{name} failed: produced only 1 chunk"
 
-# =========================
-# PyPDF (INTENTIONALLY MINIMAL)
-# =========================
+
 
 def extract_with_pypdf(pdf_path: str) -> List[Dict]:
     from pypdf import PdfReader
     reader = PdfReader(pdf_path)
     text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
-
-    # naive: whole doc = one chunk
     return [{
         "chunk_id": "pypdf_0",
         "title": "__entire_document__",
         "text": text
     }]
 
-# =========================
-# Sherpa (STRUCTURE ONLY)
-# =========================
+
 
 def extract_with_sherpa(pdf_path: str) -> List[Dict]:
     """
-    Simulated Sherpa behavior:
-    - layout-based
-    - section aware
-    - NO semantic reasoning
+    Proper LLM Sherpa usage via HTTP API.
+    Layout-based parsing only.
     """
-    from pypdf import PdfReader
-    reader = PdfReader(pdf_path)
-    text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
+    import requests
 
-    paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 50]
+    SHERPA_URL = "http://localhost:5010/api/parseDocument"
+
+    with open(pdf_path, "rb") as f:
+        files = {"file": f}
+        params = {
+            "renderFormat": "all"
+        }
+        resp = requests.post(SHERPA_URL, files=files, params=params)
+
+    if resp.status_code != 200:
+        print("Sherpa API failed, status:", resp.status_code)
+        return []
+
+    data = resp.json()
 
     chunks = []
-    current = []
-    title = "__root__"
 
-    for p in paragraphs:
-        if p[:4].split()[0].rstrip(".").isdigit():
-            if current:
-                chunks.append({
-                    "chunk_id": f"sherpa_{len(chunks)}",
-                    "title": title,
-                    "text": "\n\n".join(current)
-                })
-            title = p.split("\n")[0][:80]
-            current = []
-        else:
-            current.append(p)
+    for i, block in enumerate(data.get("sections", [])):
+        text = block.get("text", "").strip()
+        if not text:
+            continue
 
-    if current:
+        title = block.get("title", "__layout__")
+
         chunks.append({
-            "chunk_id": f"sherpa_{len(chunks)}",
+            "chunk_id": f"sherpa_{i}",
             "title": title,
-            "text": "\n\n".join(current)
+            "text": text
         })
 
-    assert_chunks(chunks, "Sherpa")
+    if len(chunks) <= 1:
+        print("Sherpa: layout weak or flattened, produced <=1 chunk")
+
+    return chunks
+    """
+    Proper LLM Sherpa usage via LangChain.
+    Layout-based only. No semantic reasoning.
+    """
+    from langchain_community.document_loaders import LLMSherpaPDFLoader
+
+    sherpa_url = "http://localhost:5010/api/parseDocument?renderFormat=all"
+
+    loader = LLMSherpaPDFLoader(
+        file_path=pdf_path,
+        llmsherpa_api_url=sherpa_url
+    )
+
+    docs = loader.load()
+
+    chunks = []
+    for i, d in enumerate(docs):
+        text = d.page_content.strip()
+        if not text:
+            continue
+        title = d.metadata.get("section_title", "__layout__")
+        chunks.append({
+            "chunk_id": f"sherpa_{i}",
+            "title": title,
+            "text": text
+        })
+
+    # no assert here — 1 chunk is a valid layout outcome
+    if len(chunks) <= 1:
+        print("Sherpa: layout weak or flattened, produced <=1 chunk")
+
     return chunks
 
-# =========================
-# PROMPT-DRIVEN SEMANTIC PIPELINE
-# =========================
+
 
 STRUCTURE_ANALYST_PROMPT = """
 You are a document structure analyst.
 
-You receive ordered text blocks (paragraph-level).
-Your task is to decide SEMANTIC CHUNK BOUNDARIES.
+You receive ordered paragraph blocks.
+Decide semantic chunk boundaries.
 
-For EACH block decide:
-- Does this START a new semantic chunk?
-- What is the role of this block?
+For each block:
+- Does it start a NEW semantic chunk?
+- What is its role?
 
 Rules:
-- Remove headers/footers.
-- Do NOT merge unrelated topics.
+- Ignore headers, footers, signatures, boilerplate.
+- Do not merge unrelated topics.
 - Prefer semantic completeness over size.
-- Tables and referenced paragraphs stay together.
-- Output STRICT JSON ONLY.
+- Output STRICT JSON only.
 
 Output format:
 [
@@ -101,7 +125,7 @@ Output format:
     "block_id": "b0",
     "new_chunk": true,
     "role": "section_header|subsection_header|body|list|table|noise",
-    "reason": "short explanation",
+    "reason": "short",
     "confidence": 0.0-1.0
   }
 ]
@@ -123,54 +147,65 @@ def extract_with_prompt(pdf_path: str) -> List[Dict]:
     reader = PdfReader(pdf_path)
     raw_text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
 
-    # TRUE MICRO-BLOCKS (paragraphs)
     blocks = [
         {"id": f"b{i}", "text": p.strip()}
         for i, p in enumerate(raw_text.split("\n\n"))
-        if len(p.strip()) > 50
+        if len(p.strip()) > 40
     ]
 
-    assert len(blocks) > 1, "Not enough blocks for semantic chunking"
+    if len(blocks) <= 1:
+        raise RuntimeError("Not enough content for semantic chunking")
 
     messages = [
-        {"role": "system", "content": "You output STRICT JSON only."},
+        {"role": "system", "content": "Output strict JSON only."},
         {"role": "user", "content": STRUCTURE_ANALYST_PROMPT + "\n\nBlocks:\n" + json.dumps(blocks)}
     ]
 
     resp = call_llm(messages)
-    decisions = json.loads(resp.choices[0].message.content)
 
+    print("LLM Response:", resp)
+
+    try:
+        if not resp or not hasattr(resp, "choices") or not resp.choices:
+            raise ValueError("Invalid response from LLM: Missing 'choices'")
+        decisions = json.loads(resp.choices[0].message.content)
+    except (AttributeError, JSONDecodeError, ValueError) as e:
+        raise RuntimeError(f"Failed to parse LLM response: {e}")
 
     chunks = []
-    current_chunk = []
+    current = []
     title = "__auto__"
 
     for dec, block in zip(decisions, blocks):
         if dec["role"] == "noise":
             continue
 
-        if dec["new_chunk"] and current_chunk:
+        if dec["new_chunk"] and current:
             chunks.append({
                 "chunk_id": f"prompt_{len(chunks)}",
                 "title": title,
-                "text": "\n\n".join(current_chunk)
+                "text": "\n\n".join(current)
             })
-            current_chunk = []
+            current = []
 
         if dec["role"] in ["section_header", "subsection_header"]:
             title = block["text"][:80]
 
-        current_chunk.append(block["text"])
+        current.append(block["text"])
 
-    if current_chunk:
+    if current:
         chunks.append({
             "chunk_id": f"prompt_{len(chunks)}",
             "title": title,
-            "text": "\n\n".join(current_chunk)
+            "text": "\n\n".join(current)
         })
 
-    assert_chunks(chunks, "Prompt-based")
+    if len(chunks) <= 1:
+        raise RuntimeError("Prompt chunking failed — investigate prompt or document")
+
     return chunks
+
+
 
 
 def run(pdf_path: str):
@@ -178,20 +213,24 @@ def run(pdf_path: str):
 
     t0 = time.time()
     pypdf_chunks = extract_with_pypdf(pdf_path)
-    print(f"PyPDF    → {len(pypdf_chunks)} chunks | {time.time()-t0:.2f}s")
+    print(f"PyPDF    -> {len(pypdf_chunks)} chunks | {time.time()-t0:.2f}s")
 
     t0 = time.time()
     sherpa_chunks = extract_with_sherpa(pdf_path)
-    print(f"Sherpa   → {len(sherpa_chunks)} chunks | {time.time()-t0:.2f}s")
+    print(f"Sherpa   -> {len(sherpa_chunks)} chunks | {time.time()-t0:.2f}s")
 
+    # Route to prompt chunker if Sherpa is weak
     t0 = time.time()
-    prompt_chunks = extract_with_prompt(pdf_path)
-    print(f"Prompt   → {len(prompt_chunks)} chunks | {time.time()-t0:.2f}s")
+    if len(sherpa_chunks) <= 1:
+        print("Routing to semantic prompt chunker")
+        prompt_chunks = extract_with_prompt(pdf_path)
+    else:
+        prompt_chunks = extract_with_prompt(pdf_path)
+    print(f"Prompt   -> {len(prompt_chunks)} chunks | {time.time()-t0:.2f}s")
 
     return {
         "pypdf": pypdf_chunks,
         "sherpa": sherpa_chunks,
         "prompt": prompt_chunks
     }
-
 
