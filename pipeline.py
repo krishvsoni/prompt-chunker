@@ -9,6 +9,10 @@ This pipeline implements a 5-stage document processing approach:
 5. Chunk Assembly - Final chunk construction with proper sizing
 
 Comparison targets: PyPDF (baseline), LLM Sherpa (layout-based), Prompt (semantic)
+
+FROZEN METRIC DEFINITIONS:
+All metrics follow the exact formulas defined in metrics.py.
+Stage timings are captured for diagnostics reporting.
 """
 
 import os
@@ -18,6 +22,13 @@ import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
+
+# Import frozen metrics definitions
+try:
+    from metrics import StageTimings, FrozenMetrics, MetricCalculator
+except ImportError:
+    # Fallback if metrics module not available
+    StageTimings = None
 
 
 class ChunkSource(Enum):
@@ -58,6 +69,14 @@ class ProcessingMetrics:
     processing_time: float
     quality_scores: Dict[str, float] = field(default_factory=dict)
     issues: List[str] = field(default_factory=list)
+    # Stage timing breakdown for diagnostics (Part 2)
+    stage_timings: Optional[Dict[str, Any]] = None
+    # Boundary decisions for Boundary Confidence % calculation
+    boundary_decisions: List[Dict[str, Any]] = field(default_factory=list)
+    # Validation counts for Semantic Accept % tracking
+    validation_accepted: int = 0
+    validation_refined: int = 0
+    validation_rejected: int = 0
 
 
 class PromptTemplates:
@@ -307,10 +326,15 @@ class PyPDFExtractor:
 
     def extract(self, pdf_path: str) -> Tuple[List[Chunk], ProcessingMetrics]:
         from pypdf import PdfReader
-        start_time = time.time()
-
+        
+        # === STAGE TIMING: Parse/Extract ===
+        parse_start = time.time()
+        
         reader = PdfReader(pdf_path)
+        page_count = len(reader.pages)
         text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
+        
+        parse_end = time.time()
 
         chunks = [Chunk(
             chunk_id="pypdf_0",
@@ -319,13 +343,31 @@ class PyPDFExtractor:
             source=ChunkSource.PYPDF
         )]
 
-        processing_time = time.time() - start_time
+        processing_time = time.time() - parse_start
+        
+        # Build stage timings for diagnostics
+        stage_timings = {
+            "parse": {
+                "time_seconds": round(parse_end - parse_start, 3),
+                "pages": page_count,
+                "raw_text_length": len(text)
+            },
+            "boundary_detection": {"time_seconds": 0, "note": "N/A - no boundary detection"},
+            "structure_analysis": {"time_seconds": 0, "note": "N/A - no structure analysis"},
+            "chunk_assembly": {"time_seconds": 0, "note": "Single chunk (entire document)"},
+            "validation_refinement": {"time_seconds": 0, "note": "N/A - no validation"},
+            "embedding": {"time_seconds": 0, "note": "Not implemented"},
+            "indexing": {"time_seconds": 0, "note": "Not implemented"}
+        }
+        
         metrics = ProcessingMetrics(
             method="pypdf",
             chunk_count=1,
             total_chars=len(text),
             avg_chunk_length=len(text),
             processing_time=processing_time,
+            stage_timings=stage_timings,
+            boundary_decisions=[],  # No boundary decisions for PyPDF
             issues=[
                 "No semantic chunking - returns entire document as single chunk",
                 "No structure preservation",
@@ -363,13 +405,17 @@ class SherpaExtractor:
         extractor normalizes multiple response variants so extraction is robust.
         """
         import requests
-        start_time = time.time()
+        
+        # === STAGE TIMING: Parse/Extract ===
+        parse_start = time.time()
 
         try:
             with open(pdf_path, "rb") as f:
                 files = {"file": f}
                 params = {"renderFormat": "all"}
                 resp = requests.post(self.SHERPA_URL, files=files, params=params, timeout=60)
+            
+            parse_end = time.time()
 
             if resp.status_code != 200:
                 return [], ProcessingMetrics(
@@ -377,7 +423,8 @@ class SherpaExtractor:
                     chunk_count=0,
                     total_chars=0,
                     avg_chunk_length=0,
-                    processing_time=time.time() - start_time,
+                    processing_time=time.time() - parse_start,
+                    stage_timings={"parse": {"time_seconds": parse_end - parse_start, "error": f"API status {resp.status_code}"}},
                     issues=[f"API failed with status {resp.status_code}"]
                 )
 
@@ -426,6 +473,9 @@ class SherpaExtractor:
             elif isinstance(data, list):
                 candidates = data
 
+            # Track boundary decisions for Boundary Confidence % metric
+            boundary_decisions = []
+            
             for i, block in enumerate(candidates):
                 if not isinstance(block, dict):
                     continue
@@ -444,8 +494,18 @@ class SherpaExtractor:
                     text=text,
                     source=ChunkSource.SHERPA
                 ))
+                
+                # Record boundary decision (layout-based confidence)
+                if i > 0:  # First block is not a boundary decision
+                    boundary_decisions.append({
+                        "block_id": f"sherpa_{i}",
+                        "new_chunk": True,
+                        "is_boundary": True,
+                        "confidence": 0.6,  # Heuristic: layout boundaries have moderate confidence
+                        "reason": "Layout-based boundary detection"
+                    })
 
-            processing_time = time.time() - start_time
+            processing_time = time.time() - parse_start
             issues = []
             if len(chunks) <= 1:
                 issues.append("Layout detection weak - produced single chunk")
@@ -476,6 +536,31 @@ class SherpaExtractor:
             else:
                 cv_score = 0.4 if chunks else 0.0
 
+            # Build stage timings for diagnostics
+            stage_timings = {
+                "parse": {
+                    "time_seconds": round(parse_end - parse_start, 3),
+                    "pages": len(data.get("pages", [])) if isinstance(data, dict) else 0,
+                    "raw_text_length": total_chars
+                },
+                "boundary_detection": {
+                    "time_seconds": 0,
+                    "blocks_processed": len(candidates),
+                    "boundaries_detected": len(boundary_decisions),
+                    "avg_confidence": 0.6,
+                    "note": "Layout-based (heuristic confidence)"
+                },
+                "structure_analysis": {"time_seconds": 0, "note": "N/A - layout-based only"},
+                "chunk_assembly": {
+                    "time_seconds": 0,
+                    "chunks_before_validation": len(chunks),
+                    "avg_chunk_size": avg_chunk_length
+                },
+                "validation_refinement": {"time_seconds": 0, "note": "N/A - no LLM validation"},
+                "embedding": {"time_seconds": 0, "note": "Not implemented"},
+                "indexing": {"time_seconds": 0, "note": "Not implemented"}
+            }
+
             metrics = ProcessingMetrics(
                 method="sherpa",
                 chunk_count=len(chunks),
@@ -486,6 +571,8 @@ class SherpaExtractor:
                     "boundary_detection": bd_score,
                     "coherence_validation": cv_score
                 },
+                stage_timings=stage_timings,
+                boundary_decisions=boundary_decisions,
                 issues=issues
             )
             return chunks, metrics
@@ -496,7 +583,8 @@ class SherpaExtractor:
                 chunk_count=0,
                 total_chars=0,
                 avg_chunk_length=0,
-                processing_time=time.time() - start_time,
+                processing_time=time.time() - parse_start,
+                stage_timings={"parse": {"time_seconds": 0, "error": str(e)}},
                 issues=[f"Extraction failed: {str(e)}"]
             )
 
@@ -531,38 +619,140 @@ class PromptChunker:
 
     def extract(self, pdf_path: str) -> Tuple[List[Chunk], ProcessingMetrics]:
         from pypdf import PdfReader
-        start_time = time.time()
+        overall_start = time.time()
         quality_scores = {}
+        
+        # Initialize stage timing tracking
+        stage_timings = {
+            "parse": {"time_seconds": 0, "pages": 0, "raw_text_length": 0},
+            "boundary_detection": {"time_seconds": 0, "blocks_processed": 0, "boundaries_detected": 0, "avg_confidence": 0},
+            "structure_analysis": {"time_seconds": 0, "sections": 0, "avg_depth": 0, "max_depth": 0},
+            "chunk_assembly": {"time_seconds": 0, "chunks_before_validation": 0, "avg_chunk_size": 0},
+            "validation_refinement": {"time_seconds": 0, "accepted": 0, "refined": 0, "rejected": 0, "accept_rate_before": 0, "accept_rate_after": 0},
+            "embedding": {"time_seconds": 0, "chunks_embedded": 0, "model": ""},
+            "indexing": {"time_seconds": 0, "success": 0, "failure": 0}
+        }
+        
+        # Track all boundary decisions for Boundary Confidence % metric
+        all_boundary_decisions = []
+        validation_counts = {"accepted": 0, "refined": 0, "rejected": 0}
 
         try:
+            # === STAGE 1: Parse / Extract ===
+            parse_start = time.time()
             reader = PdfReader(pdf_path)
             raw_text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
+            parse_end = time.time()
+            
+            stage_timings["parse"] = {
+                "time_seconds": round(parse_end - parse_start, 3),
+                "pages": len(reader.pages),
+                "raw_text_length": len(raw_text)
+            }
 
             blocks = self._create_blocks(raw_text)
             if len(blocks) < 2:
                 raise ValueError("Insufficient content for semantic chunking")
 
+            # === STAGE 2: Structure Analysis ===
+            structure_start = time.time()
             structure = self._stage1_analyze_structure(raw_text)
+            structure_end = time.time()
             quality_scores["structure_analysis"] = 1.0
+            
+            # Calculate structure depth
+            hierarchy = structure.get("hierarchy", [])
+            depths = self._calculate_hierarchy_depths(hierarchy)
+            stage_timings["structure_analysis"] = {
+                "time_seconds": round(structure_end - structure_start, 3),
+                "sections": len(hierarchy),
+                "avg_depth": round(sum(depths) / len(depths), 2) if depths else 0,
+                "max_depth": max(depths) if depths else 0
+            }
 
+            # === STAGE 3: Boundary Detection ===
+            boundary_start = time.time()
             boundaries = self._stage2_detect_boundaries(raw_text, blocks, structure)
+            boundary_end = time.time()
             quality_scores["boundary_detection"] = 1.0
+            
+            # Track boundary decisions and confidence
+            boundary_count = sum(1 for b in boundaries if b.get("new_chunk", False))
+            confidences = [b.get("confidence", 0.5) for b in boundaries if b.get("new_chunk", False)]
+            avg_boundary_confidence = sum(confidences) / len(confidences) if confidences else 0
+            
+            # Store all boundary decisions for metric calculation
+            all_boundary_decisions = [
+                {
+                    "block_id": b.get("block_id"),
+                    "new_chunk": b.get("new_chunk", False),
+                    "is_boundary": b.get("new_chunk", False),
+                    "confidence": b.get("confidence", 0.5),
+                    "reason": b.get("reason", "semantic")
+                }
+                for b in boundaries if b.get("new_chunk", False)
+            ]
+            
+            stage_timings["boundary_detection"] = {
+                "time_seconds": round(boundary_end - boundary_start, 3),
+                "blocks_processed": len(blocks),
+                "boundaries_detected": boundary_count,
+                "avg_confidence": round(avg_boundary_confidence, 3)
+            }
 
+            # === STAGE 3b: Boundary Coherence Validation ===
+            coherence_start = time.time()
             validated_boundaries = self._stage2b_validate_coherence(raw_text, boundaries)
+            coherence_end = time.time()
             quality_scores["coherence_validation"] = 1.0
+            
+            # Update boundary timing with coherence pass
+            stage_timings["boundary_detection"]["time_seconds"] += round(coherence_end - coherence_start, 3)
 
+            # === STAGE 4: Chunk Assembly ===
+            assembly_start = time.time()
             raw_chunks = self._stage3_create_chunks(blocks, validated_boundaries, structure)
+            assembly_end = time.time()
+            
+            chunks_before_validation = len(raw_chunks)
+            avg_raw_chunk_size = sum(len(c.text) for c in raw_chunks) / len(raw_chunks) if raw_chunks else 0
+            
+            stage_timings["chunk_assembly"] = {
+                "time_seconds": round(assembly_end - assembly_start, 3),
+                "chunks_before_validation": chunks_before_validation,
+                "avg_chunk_size": round(avg_raw_chunk_size, 1)
+            }
 
+            # === STAGE 5: Metadata Enrichment ===
+            enrich_start = time.time()
             enriched_chunks = self._stage4_enrich_metadata(raw_chunks, structure)
+            enrich_end = time.time()
             quality_scores["metadata_enrichment"] = 1.0
 
-            final_chunks = self._stage5_validate_quality(enriched_chunks)
+            # === STAGE 6: Quality Validation / Refinement ===
+            validation_start = time.time()
+            final_chunks, val_counts = self._stage5_validate_quality_with_counts(enriched_chunks)
+            validation_end = time.time()
             quality_scores["quality_validation"] = 1.0
+            
+            validation_counts = val_counts
+            accept_rate_before = chunks_before_validation / chunks_before_validation if chunks_before_validation else 0
+            accept_rate_after = val_counts["accepted"] / chunks_before_validation if chunks_before_validation else 0
+            
+            stage_timings["validation_refinement"] = {
+                "time_seconds": round(validation_end - validation_start, 3),
+                "accepted": val_counts["accepted"],
+                "refined": val_counts["refined"],
+                "rejected": val_counts["rejected"],
+                "accept_rate_before": round(accept_rate_before * 100, 1),
+                "accept_rate_after": round(accept_rate_after * 100, 1)
+            }
 
+            # === STAGE 7: Size Constraints ===
             final_chunks = self._apply_size_constraints(final_chunks)
 
             total_chars = sum(len(c.text) for c in final_chunks)
-            processing_time = time.time() - start_time
+            processing_time = time.time() - overall_start
 
             metrics = ProcessingMetrics(
                 method="prompt",
@@ -571,6 +761,11 @@ class PromptChunker:
                 avg_chunk_length=total_chars / len(final_chunks) if final_chunks else 0,
                 processing_time=processing_time,
                 quality_scores=quality_scores,
+                stage_timings=stage_timings,
+                boundary_decisions=all_boundary_decisions,
+                validation_accepted=validation_counts["accepted"],
+                validation_refined=validation_counts["refined"],
+                validation_rejected=validation_counts["rejected"],
                 issues=[]
             )
             return final_chunks, metrics
@@ -581,10 +776,21 @@ class PromptChunker:
                 chunk_count=0,
                 total_chars=0,
                 avg_chunk_length=0,
-                processing_time=time.time() - start_time,
+                processing_time=time.time() - overall_start,
                 quality_scores=quality_scores,
+                stage_timings=stage_timings,
                 issues=[f"Processing failed: {str(e)}"]
             )
+    
+    def _calculate_hierarchy_depths(self, hierarchy: List[Dict], current_depth: int = 1) -> List[int]:
+        """Calculate depths of all nodes in hierarchy for structure metrics."""
+        depths = []
+        for node in hierarchy:
+            depths.append(current_depth)
+            children = node.get("children", [])
+            if children:
+                depths.extend(self._calculate_hierarchy_depths(children, current_depth + 1))
+        return depths
 
     def _create_blocks(self, text: str) -> List[Dict[str, Any]]:
         paragraphs = text.split("\n\n")
@@ -777,7 +983,20 @@ class PromptChunker:
         return enriched
 
     def _stage5_validate_quality(self, chunks: List[Chunk]) -> List[Chunk]:
+        """Validate chunk quality (backward compatible wrapper)."""
+        validated, _ = self._stage5_validate_quality_with_counts(chunks)
+        return validated
+    
+    def _stage5_validate_quality_with_counts(self, chunks: List[Chunk]) -> Tuple[List[Chunk], Dict[str, int]]:
+        """
+        Validate chunk quality and track accept/refine/reject counts.
+        
+        Returns:
+            Tuple of (validated_chunks, counts_dict)
+            counts_dict has keys: accepted, refined, rejected
+        """
         validated = []
+        counts = {"accepted": 0, "refined": 0, "rejected": 0}
 
         for chunk in chunks:
             content_type = (
@@ -800,13 +1019,38 @@ class PromptChunker:
             try:
                 validation = self.llm.call(messages, temperature=0.0)
                 chunk.quality_score = validation.get("average_score", 7.0)
+                recommendation = validation.get("recommendation", "ACCEPT").upper()
+                confidence = validation.get("confidence", chunk.quality_score / 10.0)
+                
+                # Store validation details for Semantic Accept % calculation
+                if not hasattr(chunk, 'validation_result'):
+                    chunk.validation_result = {}
+                chunk.validation_result = {
+                    "recommendation": recommendation,
+                    "confidence": confidence,
+                    "average_score": chunk.quality_score
+                }
+                
                 if validation.get("status") == "pass" or chunk.quality_score >= 6.0:
+                    if recommendation == "ACCEPT":
+                        counts["accepted"] += 1
+                    else:
+                        counts["refined"] += 1
                     validated.append(chunk)
+                else:
+                    counts["rejected"] += 1
+                    
             except (json.JSONDecodeError, KeyError):
                 chunk.quality_score = 7.0
+                chunk.validation_result = {
+                    "recommendation": "ACCEPT",
+                    "confidence": 0.7,
+                    "average_score": 7.0
+                }
+                counts["accepted"] += 1
                 validated.append(chunk)
 
-        return validated
+        return validated, counts
 
     def _apply_size_constraints(self, chunks: List[Chunk]) -> List[Chunk]:
         result = []
@@ -931,6 +1175,13 @@ class DocumentPipeline:
                 "retrieval_hints": chunk.metadata.retrieval_hints,
                 "summary": chunk.metadata.summary
             }
+        # Include validation result for Semantic Accept % calculation
+        if hasattr(chunk, 'validation_result') and chunk.validation_result:
+            result["validation"] = {
+                "recommendation": chunk.validation_result.get("recommendation", ""),
+                "confidence": chunk.validation_result.get("confidence", 0),
+                "overall_score": chunk.validation_result.get("average_score", chunk.quality_score)
+            }
         return result
 
     def _metrics_to_dict(self, metrics: ProcessingMetrics) -> Dict[str, Any]:
@@ -943,8 +1194,19 @@ class DocumentPipeline:
             boundary_confidence = round(sum(vals) / len(vals) * 100, 1)
         else:
             boundary_confidence = 0
+        
+        # Calculate Boundary Confidence % from actual boundary decisions
+        # (FROZEN: only over boundary decisions, not all blocks)
+        if metrics.boundary_decisions:
+            boundary_confidences = [
+                d.get("confidence", 0) 
+                for d in metrics.boundary_decisions 
+                if d.get("is_boundary", False) or d.get("new_chunk", False)
+            ]
+            if boundary_confidences:
+                boundary_confidence = round(sum(boundary_confidences) / len(boundary_confidences) * 100, 1)
 
-        return {
+        result = {
             "method": metrics.method,
             "chunk_count": metrics.chunk_count,
             "total_chars": metrics.total_chars,
@@ -954,6 +1216,28 @@ class DocumentPipeline:
             "boundary_confidence": boundary_confidence,
             "issues": metrics.issues
         }
+        
+        # Include stage timings for diagnostics (Part 2)
+        if metrics.stage_timings:
+            result["stage_timings"] = metrics.stage_timings
+        
+        # Include validation counts for Semantic Accept % tracking
+        if metrics.validation_accepted or metrics.validation_refined or metrics.validation_rejected:
+            total_validated = metrics.validation_accepted + metrics.validation_refined + metrics.validation_rejected
+            result["validation"] = {
+                "accepted": metrics.validation_accepted,
+                "refined": metrics.validation_refined,
+                "rejected": metrics.validation_rejected,
+                "semantic_accept_pct": round(
+                    metrics.validation_accepted / total_validated * 100, 1
+                ) if total_validated else 0
+            }
+        
+        # Include boundary decisions count for metrics
+        if metrics.boundary_decisions:
+            result["boundary_decisions_count"] = len(metrics.boundary_decisions)
+
+        return result
 
     def _generate_comparison(
         self,

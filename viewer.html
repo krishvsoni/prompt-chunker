@@ -51,14 +51,46 @@
         thead.appendChild(trh);
         tbl.appendChild(thead);
         const tbody = document.createElement('tbody');
-        const metrics = ['total_chunks','avg_chunk_length','avg_quality_score','relevance_pct','semantic_accept_rate','topk_sufficiency_rate','boundary_confidence','total_time'];
-        const labels = { total_chunks:'Total chunks', avg_chunk_length:'Avg chunk length', avg_quality_score:'Avg quality', relevance_pct:'Relevance %', semantic_accept_rate:'Semantic Accept %', topk_sufficiency_rate:'Top-K Sufficiency %', boundary_confidence:'Boundary Confidence %', total_time:'Total time (s)'};
+        
+        function getValue(data, key) {
+          if (!data) return 'N/A';
+          const val = data[key];
+          if (val === undefined || val === null) return 'N/A';
+          if (typeof val === 'object' && val !== null) {
+            // Handle nested objects with 'value' property
+            if ('value' in val) {
+              const v = val.value;
+              const unit = val.unit || val.scale || '';
+              const k = val.k ? ` (K=${val.k})` : '';
+              if (typeof v === 'number') {
+                return v.toFixed(2) + (unit ? ` ${unit}` : '') + k;
+              }
+              return v + (unit ? ` ${unit}` : '') + k;
+            }
+            return JSON.stringify(val);
+          }
+          if (typeof val === 'number') return val.toFixed(2);
+          return val;
+        }
+        
+        // Updated metrics mapping: new key -> display label
+        const metrics = [
+          { key: 'total_chunks', label: 'Total chunks' },
+          { key: 'avg_chunk_length', label: 'Avg chunk length' },
+          { key: 'avg_quality', label: 'Avg quality (0-1)' },
+          { key: 'relevance_pct', label: 'Relevance %' },
+          { key: 'semantic_accept_pct', label: 'Semantic Accept %' },
+          { key: 'topk_sufficiency_pct', label: 'Top-K Sufficiency %' },
+          { key: 'boundary_confidence_pct', label: 'Boundary Confidence %' },
+          { key: 'total_time_seconds', label: 'Total time (s)' }
+        ];
+        
         for(const m of metrics){
           const tr = document.createElement('tr');
-          tr.innerHTML = `<td>${labels[m]||m}</td>` +
-            `<td>${(obj.pypdf && obj.pypdf[m]) ?? 'N/A'}</td>`+
-            `<td>${(obj.sherpa && obj.sherpa[m]) ?? 'N/A'}</td>`+
-            `<td>${(obj.prompt && obj.prompt[m]) ?? 'N/A'}</td>`;
+          tr.innerHTML = `<td>${m.label}</td>` +
+            `<td>${getValue(obj.pypdf, m.key)}</td>`+
+            `<td>${getValue(obj.sherpa, m.key)}</td>`+
+            `<td>${getValue(obj.prompt, m.key)}</td>`;
           tbody.appendChild(tr);
         }
         tbl.appendChild(tbody);
@@ -68,6 +100,60 @@
       // Aggregate
       const aggDiv = document.getElementById('aggregate');
       aggDiv.appendChild(mkTable(data.summary));
+      
+      // Add stage breakdown table
+      if (data.summary.pypdf?.stage_breakdown || data.summary.sherpa?.stage_breakdown || data.summary.prompt?.stage_breakdown) {
+        const stageDiv = document.createElement('div');
+        stageDiv.innerHTML = '<h3>Stage Timing Breakdown (seconds)</h3>';
+        const stageTbl = document.createElement('table');
+        const stageHead = document.createElement('thead');
+        stageHead.innerHTML = '<tr><th>Stage</th><th>PyPDF</th><th>Sherpa</th><th>Prompt</th></tr>';
+        stageTbl.appendChild(stageHead);
+        const stageBody = document.createElement('tbody');
+        
+        const stages = ['parse', 'boundary_detection', 'structure_analysis', 'chunk_assembly', 'validation_refinement', 'embedding', 'indexing'];
+        const stageLabels = {
+          parse: 'Parse/Extract',
+          boundary_detection: 'Boundary Detection',
+          structure_analysis: 'Structure Analysis',
+          chunk_assembly: 'Chunk Assembly',
+          validation_refinement: 'Validation/Refinement',
+          embedding: 'Embedding',
+          indexing: 'Indexing'
+        };
+        
+        for (const stage of stages) {
+          const tr = document.createElement('tr');
+          const pypdfVal = data.summary.pypdf?.stage_breakdown?.[stage] ?? 0;
+          const sherpaVal = data.summary.sherpa?.stage_breakdown?.[stage] ?? 0;
+          const promptVal = data.summary.prompt?.stage_breakdown?.[stage] ?? 0;
+          tr.innerHTML = `<td>${stageLabels[stage] || stage}</td><td>${pypdfVal.toFixed(2)}</td><td>${sherpaVal.toFixed(2)}</td><td>${promptVal.toFixed(2)}</td>`;
+          stageBody.appendChild(tr);
+        }
+        stageTbl.appendChild(stageBody);
+        stageDiv.appendChild(stageTbl);
+        aggDiv.appendChild(stageDiv);
+      }
+
+      // Add metric explanation
+      if (data.analysis?.metric_explanation) {
+        const expDiv = document.createElement('div');
+        expDiv.style.background = '#e7f3ff';
+        expDiv.style.border = '1px solid #0d6efd';
+        expDiv.style.borderRadius = '6px';
+        expDiv.style.padding = '12px';
+        expDiv.style.marginTop = '12px';
+        expDiv.innerHTML = `<strong> Metric Note:</strong> ${data.analysis.metric_explanation}`;
+        aggDiv.appendChild(expDiv);
+      }
+      
+      // Add K values info
+      if (data.k_values) {
+        const kDiv = document.createElement('p');
+        kDiv.className = 'small';
+        kDiv.innerHTML = `<strong>K Values:</strong> Relevance K=${data.k_values.relevance_k}, Sufficiency K=${data.k_values.sufficiency_k}`;
+        aggDiv.appendChild(kDiv);
+      }
 
     //   // Method Analysis: Flaws & Advantages
     //   if(data.analysis){
