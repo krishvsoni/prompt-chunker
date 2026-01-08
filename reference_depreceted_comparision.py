@@ -1,5 +1,7 @@
 """
-This is old code which I wrote in intial level to compare different PDF extraction methods.
+UNUSED FILE - DEPRECATED
+
+This is the very first script which I wrote at the initial level to compare different PDF extraction methods.
 It contains functions to extract text from PDFs using PyPDF, LLM Sherpa, and a prompt-based chunking approach.
 """
 

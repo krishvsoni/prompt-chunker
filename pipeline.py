@@ -354,6 +354,14 @@ class SherpaExtractor:
     SHERPA_URL = "http://localhost:5010/api/parseDocument"
 
     def extract(self, pdf_path: str) -> Tuple[List[Chunk], ProcessingMetrics]:
+        """
+        Extract layout blocks from the Sherpa HTTP API.
+
+        Reason: Sherpa can return different JSON shapes across deployments (e.g.
+        nested under `return_dict.result`) and provides block text as a `sentences`
+        list instead of a single `text` field. This docstring documents why the
+        extractor normalizes multiple response variants so extraction is robust.
+        """
         import requests
         start_time = time.time()
 
@@ -374,18 +382,65 @@ class SherpaExtractor:
                 )
 
             data = resp.json()
+            data = resp.json()
             chunks = []
             total_chars = 0
 
-            for i, block in enumerate(data.get("sections", [])):
-                text = block.get("text", "").strip()
+            # Try common response shapes from Sherpa/LLMSherpa.
+            # Some Sherpa deployments nest parsed output under `return_dict.result`,
+            # and blocks may contain a `sentences` list instead of a single `text` field.
+            # We normalize these variants so extraction is robust across versions.
+            # Unwrap `return_dict.result` if present so downstream heuristics find blocks/pages.
+            if isinstance(data, dict) and data.get("return_dict") and isinstance(data.get("return_dict"), dict):
+                inner = data.get("return_dict") or {}
+                if inner.get("result") and isinstance(inner.get("result"), dict):
+                    # merge top-level with inner result for compatibility
+                    merged = dict(data)
+                    merged.update(inner.get("result"))
+                    data = merged
+
+            candidates = []
+            if isinstance(data, dict):
+                if data.get("sections"):
+                    candidates = data.get("sections")
+                elif data.get("pages"):
+                    # pages may contain blocks with text
+                    pages = data.get("pages") or []
+                    for p in pages:
+                        if isinstance(p, dict):
+                            # sections inside page
+                            for s in (p.get("sections") or []):
+                                candidates.append(s)
+                            # or text blocks
+                            for b in (p.get("blocks") or []):
+                                candidates.append(b)
+                elif data.get("blocks"):
+                    candidates = data.get("blocks")
+                else:
+                    # fallback: scan values for objects with 'text', 'page_content' or 'sentences'
+                    for v in data.values():
+                        if isinstance(v, list):
+                            for item in v:
+                                if isinstance(item, dict) and (item.get("text") or item.get("page_content") or item.get("sentences")):
+                                    candidates.append(item)
+            elif isinstance(data, list):
+                candidates = data
+
+            for i, block in enumerate(candidates):
+                if not isinstance(block, dict):
+                    continue
+                # Prefer joining `sentences` if present (Sherpa often returns this field)
+                if isinstance(block.get("sentences"), list) and block.get("sentences"):
+                    text = " ".join([s for s in block.get("sentences") if isinstance(s, str)]).strip()
+                else:
+                    text = (block.get("text") or block.get("page_content") or "").strip()
                 if not text:
                     continue
 
                 total_chars += len(text)
                 chunks.append(Chunk(
                     chunk_id=f"sherpa_{i}",
-                    title=block.get("title", "__layout__"),
+                    title=block.get("title", block.get("section_title", "__layout__")),
                     text=text,
                     source=ChunkSource.SHERPA
                 ))
@@ -394,18 +449,43 @@ class SherpaExtractor:
             issues = []
             if len(chunks) <= 1:
                 issues.append("Layout detection weak - produced single chunk")
+            if not chunks:
+                # add diagnostic info to issues to help debugging response shape
+                try:
+                    keys = list(data.keys()) if isinstance(data, dict) else [type(data).__name__]
+                except Exception:
+                    keys = [str(type(data))]
+                issues.append(f"No text blocks extracted from Sherpa response; top-level keys: {keys}")
             issues.extend([
                 "No semantic boundary detection",
                 "No metadata enrichment",
                 "Relies on visual layout which may not reflect semantic structure"
             ])
+            # Heuristic quality scores for Sherpa (used to derive boundary confidence)
+            avg_chunk_length = total_chars / len(chunks) if chunks else 0
+            bd_score = 0.0
+            if len(chunks) > 1:
+                # More chunks imply Sherpa found layout boundaries; scale up to 1.0
+                bd_score = min(1.0, len(chunks) / 10.0)
+
+            # Coherence heuristic: average chunk size in a reasonable RAG range favors higher coherence
+            if avg_chunk_length >= 200 and avg_chunk_length <= 800:
+                cv_score = 0.9
+            elif avg_chunk_length >= 100:
+                cv_score = 0.7
+            else:
+                cv_score = 0.4 if chunks else 0.0
 
             metrics = ProcessingMetrics(
                 method="sherpa",
                 chunk_count=len(chunks),
                 total_chars=total_chars,
-                avg_chunk_length=total_chars / len(chunks) if chunks else 0,
+                avg_chunk_length=avg_chunk_length,
                 processing_time=processing_time,
+                quality_scores={
+                    "boundary_detection": bd_score,
+                    "coherence_validation": cv_score
+                },
                 issues=issues
             )
             return chunks, metrics
@@ -854,6 +934,16 @@ class DocumentPipeline:
         return result
 
     def _metrics_to_dict(self, metrics: ProcessingMetrics) -> Dict[str, Any]:
+        # Derive a boundary confidence score (0-100) from any available
+        # LLM quality scores related to boundary detection and coherence.
+        bd = metrics.quality_scores.get("boundary_detection", 0)
+        cv = metrics.quality_scores.get("coherence_validation", 0)
+        vals = [v for v in (bd, cv) if v]
+        if vals:
+            boundary_confidence = round(sum(vals) / len(vals) * 100, 1)
+        else:
+            boundary_confidence = 0
+
         return {
             "method": metrics.method,
             "chunk_count": metrics.chunk_count,
@@ -861,6 +951,7 @@ class DocumentPipeline:
             "avg_chunk_length": metrics.avg_chunk_length,
             "processing_time": metrics.processing_time,
             "quality_scores": metrics.quality_scores,
+            "boundary_confidence": boundary_confidence,
             "issues": metrics.issues
         }
 
