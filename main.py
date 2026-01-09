@@ -500,10 +500,37 @@ async def main():
         }
     }
 
-    with open("output.json", "w", encoding="utf-8") as f:
+    # Ensure output directory exists
+    out_dir = "output"
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Write per-document JSON files (one file per processed PDF)
+    index = []
+    for i, doc in enumerate(results):
+        # Try to name file after original PDF if available
+        try:
+            base = os.path.splitext(os.path.basename(pdf_files[i]))[0]
+        except Exception:
+            base = f"doc_{i+1}"
+
+        # sanitize name
+        safe = ''.join(c if (c.isalnum() or c in ('-', '_')) else '_' for c in base)
+        fname = f"{i+1}_{safe}.json"
+        fpath = os.path.join(out_dir, fname)
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, default=str)
+        index.append({"file": fname, "title": doc.get("title") or base})
+
+    # Write an index of per-document files and a summary JSON
+    idx_path = os.path.join(out_dir, "index.json")
+    with open(idx_path, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2, default=str)
+
+    summary_path = os.path.join(out_dir, "summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, default=str)
 
-    print(f"\nResults saved to output.json")
+    print(f"\nResults saved to {out_dir} (per-doc JSONs, index.json, summary.json)")
 
 if __name__ == "__main__":
     asyncio.run(main())

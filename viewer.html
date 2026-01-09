@@ -35,8 +35,8 @@
     async function loadAndRender(){
       let data;
       try{
-        const resp = await fetch('output.json');
-        if(!resp.ok) throw new Error('Failed to fetch output.json: '+resp.status+' '+resp.statusText);
+        const resp = await fetch('output/summary.json');
+        if(!resp.ok) throw new Error('Failed to fetch output/summary.json: '+resp.status+' '+resp.statusText);
         data = await resp.json();
       }catch(e){
         document.body.innerHTML = '<h2>Error loading output.json</h2><pre>'+String(e)+'</pre>';
